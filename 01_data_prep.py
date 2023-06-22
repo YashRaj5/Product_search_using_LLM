@@ -70,9 +70,20 @@ os.environ['WANDS_DOWNLOAD_PATH'] = '/dbfs' + config['dbfs_path'] + '/downloads'
 
 # COMMAND ----------
 
+dbutils.fs.ls('dbfs:/wands/downloads')
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC # Write Data to Tables
 # MAGIC In this step, we will read data from each of the previously downloaded files and write the data to tables that will make subsequent access easier and faster:
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- querying the downloading data
+# MAGIC SELECT *
+# MAGIC FROM csv. `dbfs:/wands/downloads/product.csv`
 
 # COMMAND ----------
 
@@ -114,7 +125,18 @@ products_df.write.saveAsTable(table_name)
 
 # COMMAND ----------
 
+# MAGIC %sql
+# MAGIC describe extended products;
+
+# COMMAND ----------
+
 display(spark.table('products'))
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT *
+# MAGIC FROM csv. `dbfs:/wands/downloads/query.csv`
 
 # COMMAND ----------
 
@@ -150,6 +172,14 @@ products_df.write.saveAsTable(table_name)
 # COMMAND ----------
 
 display(spark.table('queries'))
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select query_class, count(query) as number_of_queries
+# MAGIC from queries
+# MAGIC group by query_class
+# MAGIC order by number_of_queries desc;
 
 # COMMAND ----------
 
@@ -220,3 +250,7 @@ if 'label_score' not in spark.table('labels').columns:
 # COMMAND ----------
 
 display(spark.table('labels'))
+
+# COMMAND ----------
+
+
