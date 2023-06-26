@@ -413,4 +413,27 @@ with mlflow.start_run() as run:
 # COMMAND ----------
 
 # DBTITLE 1,Elevate to Production
-client = mlflow.MlflowCient()
+client = mlflow.MlflowClient()
+ 
+latest_version = client.get_latest_versions(config['tuned_model_name'], stages=['None'])[0].version
+ 
+client.transition_model_version_stage(
+    name=config['tuned_model_name'],
+    version=latest_version,
+    stage='Production',
+    archive_existing_versions=True
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,Retrieve model from registry
+model = mlflow.pyfunc.load_model(f"models:/{config['tuned_model_name']}/Production")
+
+# COMMAND ----------
+
+# DBTITLE 1,Test the Persisted Model
+# construct search
+search = pd.DataFrame({'query':['farmhouse dining room table']})
+ 
+# call model
+display(model.predict(search))
