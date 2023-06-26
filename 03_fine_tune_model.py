@@ -182,4 +182,235 @@ tuned_model.fit(
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC # Estimate Fine-Tuned Model Performance
+# MAGIC With our model tuned, we can assess it's performance just like we did before:
 
+# COMMAND ----------
+
+# DBTITLE 1,Calculate Cosine Similarities for Queries & Products in Tuned Model 
+query_embeddings = (
+  tuned_model
+    .encode(
+      search_pd['query'].tolist()
+      )
+  )
+ 
+product_embeddings = (
+  tuned_model
+    .encode(
+      search_pd['product_text'].tolist()
+      )
+  )
+ 
+# determine cosine similarity for each query-product pair
+tuned_cos_sim_scores = (
+  util.pairwise_cos_sim(
+    query_embeddings, 
+    product_embeddings
+    )
+  )
+
+# COMMAND ----------
+
+# DBTITLE 1,Calculate Avg Cosine Similarity
+# average the cosine similarity scores
+tuned_cos_sim_score = torch.mean(tuned_cos_sim_scores).item()
+ 
+# display result
+print(f"With tuning, avg cosine similarity went from {original_cos_sim_score} to {tuned_cos_sim_score}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Calculate Correlation Coefficient
+# determine correlation between cosine similarities and relevancy scores
+tuned_corr_coef_score = (
+  np.corrcoef(
+    tuned_cos_sim_scores,
+    search_pd['score'].values
+  )[0][1]
+) 
+# print results
+print(f"With tuning, the correlation coefficient went from {original_corr_coef_score} to {tuned_corr_coef_score}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC We can see from these results that with just a single pass over the data, we've brought the queries closer together with our products, tuning the model to the particulars of our data.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Persist Model for Deplyment
+# MAGIC Just like before, we can package our tuned model with our data to enable its persistence (and eventual deployment). The following steps are presented just as they are in the previous notebook with minor adjustments to separate our original assets from the tuned assets:
+
+# COMMAND ----------
+
+# DBTITLE 1,Get Product Text to Search
+# assemble product text relevant to search
+product_text_pd = (
+  spark
+    .table('products')
+    .selectExpr(
+      'product_id',
+      'product_name',
+      'COALESCE(product_description, product_name) as product_text' # use product description if available, otherwise name
+      )
+  ).toPandas()
+
+# COMMAND ----------
+
+# DBTITLE 1,Load Product Info for Use with Encoder
+# assemble product documents in required format (id, text)
+documents = (
+  DataFrameLoader(
+    product_text_pd,
+    page_content_column='product_text'
+    )
+    .load()
+  )
+
+# COMMAND ----------
+
+# DBTITLE 1,Load Model as HuggingFaceEmbeddings Obejct
+# encoder path
+embedding_model_path = f"/dbfs{config['dbfs_path']}/tuned_model"
+ 
+# make sure path is clear
+dbutils.fs.rm(embedding_model_path.replace('/dbfs','dbfs:'), recurse=True)
+ 
+# reload model using langchain wrapper
+tuned_model.save(embedding_model_path)
+embedding_model = HuggingFaceEmbeddings(model_name=embedding_model_path)
+
+# COMMAND ----------
+
+# DBTITLE 1,Generate Embeddings from Product Info
+# chromadb path
+chromadb_path = f"/dbfs{config['dbfs_path']}/tuned_chromadb"
+ 
+# make sure chromadb path is clear
+dbutils.fs.rm(chromadb_path.replace('/dbfs','dbfs:'), recurse=True)
+ 
+# generate embeddings
+vectordb = Chroma.from_documents(
+  documents=documents, 
+  embedding=embedding_model, 
+  persist_directory=chromadb_path
+  )
+ 
+# persist vector db
+vectordb.persist()
+
+# COMMAND ----------
+
+# DBTITLE 1,Define Wrapper Class for Model
+class ProductSearchWrapper(mlflow.pyfunc.PythonModel):
+ 
+ 
+  # define steps to initialize model
+  def load_context(self, context):
+ 
+    # import required libraries
+    import pandas as pd
+    from langchain.embeddings import HuggingFaceEmbeddings
+    from langchain.vectorstores import Chroma
+ 
+    # retrieve embedding model
+    embedding_model = HuggingFaceEmbeddings(model_name=context.artifacts['embedding_model'])
+ 
+    # retrieve vectordb contents
+    self._vectordb = Chroma(
+      persist_directory=context.artifacts['chromadb'],
+      embedding_function=embedding_model
+      )
+ 
+    # set number of results to return
+    self._max_results = 5
+ 
+ 
+  # define steps to generate results
+  # note: query_df expects only one query
+  def predict(self, context, query_df):
+ 
+ 
+    # import required libraries
+    import pandas as pd
+ 
+    # perform search on embeddings
+    raw_results = self._vectordb.similarity_search_with_score(
+      query_df['query'].values[0], # only expecting one value at a time 
+      k=self._max_results
+      )
+ 
+    # get lists of of scores, descriptions and ids from raw results
+    scores, descriptions, names, ids = zip(
+      *[(r[1], r[0].page_content, r[0].metadata['product_name'], r[0].metadata['product_id']) for r in raw_results]
+      )
+ 
+    # reorganized results as a pandas df, sorted on score
+    results_pd = pd.DataFrame({
+      'product_id':ids,
+      'product_name':names,
+      'product_description':descriptions,
+      'score':scores
+      }).sort_values(axis=0, by='score', ascending=True)
+    
+    # set return value
+    return results_pd
+
+# COMMAND ----------
+
+# DBTITLE 1,Idnetify Model Artifacts
+artifacts = {
+  'embedding_model': embedding_model_path.replace('/dbfs','dbfs:'), 
+  'chromadb': chromadb_path.replace('/dbfs','dbfs:')
+  }
+ 
+print(
+  artifacts
+  )
+
+# COMMAND ----------
+
+# DBTITLE 1,Define Environment Requirements
+import pandas
+import langchain
+import chromadb
+import sentence_transformers
+ 
+# get base environment configuration
+conda_env = mlflow.pyfunc.get_default_conda_env()
+ 
+# define packages required by model
+packages = [
+  f'pandas=={pandas.__version__}',
+  f'langchain=={langchain.__version__}',
+  f'chromadb=={chromadb.__version__}',
+  f'sentence_transformers=={sentence_transformers.__version__}'
+  ]
+ 
+# add required packages to environment configuration
+conda_env['dependencies'][-1]['pip'] += packages
+ 
+print(
+  conda_env
+  )
+
+# COMMAND ----------
+
+# DBTITLE 1,Persist Model
+with mlflow.start_run() as run:
+ 
+    mlflow.pyfunc.log_model(
+        artifact_path='model', 
+        python_model=ProductSearchWrapper(),
+        conda_env=conda_env,
+        artifacts=artifacts, # items at artifact path will be loaded into mlflow repository
+        registered_model_name=config['tuned_model_name']
+    )
+
+# COMMAND ----------
+
+# DBTITLE 1,Elevate to Production
+client = mlflow.MlflowCient()
